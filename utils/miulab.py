@@ -69,6 +69,12 @@ def __splitTagType(tag):
 
 
 def computeF1Score(correct_slots, pred_slots):
+    """
+
+    :param correct_slots: 二重list
+    :param pred_slots: 二重list
+    :return:
+    """
     correctChunk = {}
     correctChunkCnt = 0.0
     foundCorrect = {}
