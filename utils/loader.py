@@ -127,6 +127,7 @@ class DataManager(Dataset):
 def collate_func(batch):
     """
     作为实例化 DataLoader 对象的函数参数.
+    把list打包为batch
     """
 
     n_entity = len(batch[0])
@@ -148,6 +149,10 @@ def batch_delivery(sent_list, letter_list, slot_list, intent_list, batch_size, s
         sent_list, letter_list,
         slot_list, intent_list
     )
+
+    # for i in DataLoader(torch_data, batch_size=batch_size,shuffle=shuffle,collate_fn=lambda x:x):
+    #     print(i)
+
     return DataLoader(
         torch_data, batch_size=batch_size,
         shuffle=shuffle, collate_fn=collate_func

@@ -17,7 +17,6 @@ from utils import loader
 from utils import model
 from utils import helper
 
-
 H_PARAM_DATA_DIR = "./data"         # 数据文件的所在目录路径.
 H_PARAM_TRAIN_BATCH = 32            # 训练时使用的 batch 大小.
 H_PARAM_DEV_BATCH = 200             # 开发集评分时使用的 batch 大小.
@@ -28,7 +27,7 @@ H_PARAM_TRAINING_EPOCH = 100        # 训练时, 模型迭代数据集的轮数.
 H_PARAM_LEARNING_RATE = 1e-3        # 训练时, 模型更新参数的步长.
 H_PARAM_NORM_PENALTY = 1e-6         # 更新时, 2 阶范数惩罚的大小.
 
-H_PARAM_KERNEL_SIZE = 4             # 做字符卷积时, 滑动核的宽度大小.
+H_PARAM_KERNEL_SIZE = [4]             # 做字符卷积时, 滑动核的宽度大小.
 H_PARAM_WORD_EMBEDDING = 128        # 编码词向量的维度大小.
 H_PARAM_LETTER_EMBEDDING = 12       # 编码字符向量的维度大小.
 H_PARAM_ATTENTION_DIM = 64          # 自注意力机制的输出维度大小.
@@ -78,8 +77,12 @@ train_digit_slot_list = helper.iterative_support(slot_alphabet.index, train_text
 train_digit_intent_list = helper.iterative_support(intent_alphabet.index, train_text_intent_list)
 dev_digit_sent_list = helper.iterative_support(word_alphabet.index, dev_text_sent_list)
 dev_digit_letter_list = helper.iterative_support(letter_alphabet.index, dev_text_letter_list)
+dev_digit_slot_list = helper.iterative_support(slot_alphabet.index, dev_text_slot_list)
+dev_digit_intent_list = helper.iterative_support(intent_alphabet.index, dev_text_intent_list)
 test_digit_sent_list = helper.iterative_support(word_alphabet.index, test_text_sent_list)
 test_digit_letter_list = helper.iterative_support(letter_alphabet.index, test_text_letter_list)
+test_digit_slot_list = helper.iterative_support(slot_alphabet.index, test_text_slot_list)
+test_digit_intent_list = helper.iterative_support(intent_alphabet.index, test_text_intent_list)
 
 # 构建 train, dev, test 等的 batch 分发对象.
 train_loader = loader.batch_delivery(
@@ -89,12 +92,12 @@ train_loader = loader.batch_delivery(
 )
 dev_loader = loader.batch_delivery(
     dev_digit_sent_list, dev_digit_letter_list,
-    dev_text_slot_list, dev_text_intent_list,
+    dev_digit_slot_list, dev_digit_intent_list,
     H_PARAM_DEV_BATCH, False
 )
 test_loader = loader.batch_delivery(
     test_digit_sent_list, test_digit_letter_list,
-    test_text_slot_list, test_text_intent_list,
+    test_digit_slot_list, test_digit_intent_list,
     H_PARAM_TEST_BATCH, False
 )
 
@@ -109,6 +112,6 @@ model = model.GatedAttentionSLU(
 process = helper.Process(
     model, H_PARAM_TRAINING_EPOCH, H_PARAM_LEARNING_RATE,
     H_PARAM_NORM_PENALTY, H_PARAM_MAX_LETTER_LEN, train_loader,
-    dev_loader, test_loader, slot_alphabet, intent_alphabet
+    dev_loader, test_loader, slot_alphabet, intent_alphabet,
 )
 process.train_model()

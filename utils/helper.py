@@ -15,8 +15,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
+from torchnet import meter
 
 from utils.miulab import computeF1Score
+from utils import visual
 
 
 def iterative_support(func, x):
@@ -28,7 +30,7 @@ def iterative_support(func, x):
         return [iterative_support(func, elem) for elem in x]
 
     # 预检测, 防 bug.
-    assert isinstance(x, (int, str, unicode))
+    assert isinstance(x, (int, bytes, str))
 
     return func(x)
 
@@ -42,6 +44,10 @@ def get_letter(word):
 
 
 def expand_list(nested_list):
+    """
+    多个list -> 一个list
+    """
+
     for item in nested_list:
         if isinstance(item, (list, tuple)):
             for sub_item in expand_list(item):
@@ -51,6 +57,10 @@ def expand_list(nested_list):
 
 
 def nest_list(items, seq_lens):
+    """
+    一个list -> 多个list
+    """
+
     num_items = len(items)
     trans_items = [[] for _ in range(0, num_items)]
 
@@ -84,7 +94,7 @@ class Padding(object):
         seq_lens = [len(element) for element in sent_list]
         max_len = max(seq_lens)
 
-        # 对句子表进行排序, 然后将 index 的表存下来.
+        # 对句子表进行排序（从大到小）, 然后将 index 的表存下来.
         arg_list = np.argsort(seq_lens)[::-1]
 
         m_sent_list, m_letter_list, m_seq_lens = [], [], []
@@ -161,6 +171,13 @@ class Process(object):
         self._slot_alphabet = slot_alphabet
         self._intent_alphabet = intent_alphabet
 
+        # 可视化
+        self._vis = visual.Visualizer(env='loss')
+        self._train_slot_loss_meter = meter.AverageValueMeter()
+        self._train_intent_loss_meter = meter.AverageValueMeter()
+        self._dev_slot_loss_meter = meter.AverageValueMeter()
+        self._dev_intent_loss_meter = meter.AverageValueMeter()
+
         if torch.cuda.is_available():
             self._model = self._model.cuda()
 
@@ -178,6 +195,11 @@ class Process(object):
     def train_model(self):
         self._model.train()
 
+        self._train_slot_loss_meter.reset()
+        self._train_intent_loss_meter.reset()
+        self._dev_slot_loss_meter.reset()
+        self._dev_intent_loss_meter.reset()
+
         best_dev_slot_slot, best_dev_intent_intent = 0.0, 0.0
         best_dev_both_slot, best_dev_both_intent = 0.0, 0.0
 
@@ -187,15 +209,19 @@ class Process(object):
 
         for epoch in range(0, self._num_epoch):
             total_slot_loss, total_intent_loss = 0.0, 0.0
+            data_size = 0.0
 
             epoch_time_start = time.time()
             for sent, letter, slot, intent in self._train_loader:
+                batch_size = len(intent)
+                data_size += batch_size
+
                 p_sent, p_letter, [p_slot, p_intent], seq_lens = Padding.word_padding(
                     sent, letter, [slot, intent]
                 )
                 e_letter = Padding.letter_padding(p_letter, self._max_letter_len)
 
-                e_slot = list(expand_list(p_slot))
+                e_slot = list(expand_list(p_slot)) # 整合成一个列表
                 e_intent = list(expand_list(p_intent))
 
                 var_sent = Variable(torch.LongTensor(p_sent))
@@ -218,14 +244,28 @@ class Process(object):
                 total_loss.backward()
                 self._optimizer.step()
 
-                total_slot_loss += slot_loss.cpu().data.numpy()[0]
-                total_intent_loss += intent_loss.cpu().data.numpy()[0]
+                total_slot_loss += slot_loss.cpu().data.numpy()[0] * batch_size
+                total_intent_loss += intent_loss.cpu().data.numpy()[0] * batch_size
 
+            avg_slot_loss = total_slot_loss / data_size
+            avg_intent_loss = total_intent_loss / data_size
             epoch_time_con = time.time() - epoch_time_start
-            print "[轮数 {:03d}]: 模型在 slot 上的损失为: {:04.6f}, 在 intent 上的损失为: {:04.6f}, 共耗" \
-                  "时: {:03.6f} 秒.\n".format(epoch, total_slot_loss, total_intent_loss, epoch_time_con)
+            print("[轮数 {:03d}]: 模型在 slot 上的损失为: {:04.6f}, 在 intent 上的损失为: {:04.6f}, 共耗" \
+                  "时: {:03.6f} 秒.\n".format(epoch, avg_slot_loss, avg_intent_loss, epoch_time_con))
 
-            dev_slot, dev_intent = self._estimate(True)  # 检查模型在 dev 集的效果.
+            dev_slot, dev_intent, dev_slot_loss, dev_intent_loss = self._estimate(True)  # 检查模型在 dev 集的效果.
+
+            # 可视化
+            self._train_slot_loss_meter.add(avg_slot_loss)
+            self._train_intent_loss_meter.add(avg_intent_loss)
+            self._dev_slot_loss_meter.add(dev_slot_loss)
+            self._dev_intent_loss_meter.add(dev_intent_loss)
+            self._vis.plot_many_stack({'train_slot_loss': self._train_slot_loss_meter.value()[0],
+                                       'train_intent_loss': self._train_intent_loss_meter.value()[0]})
+            self._vis.plot_many_stack({'train_slot_loss': self._train_slot_loss_meter.value()[0],
+                                       'dev_slot_loss': self._dev_slot_loss_meter.value()[0]})
+            self._vis.plot_many_stack({'train_intent_loss': self._train_intent_loss_meter.value()[0],
+                                       'dev_intent_loss': self._dev_intent_loss_meter.value()[0]})
 
             slot_flag = dev_slot >= best_dev_slot_slot
             intent_flag = dev_intent >= best_dev_intent_intent
@@ -233,30 +273,39 @@ class Process(object):
 
             time_estimate_start = time.time()
             if slot_flag or intent_flag or both_flag:
-                test_slot, test_intent = self._estimate(False)
+                test_slot, test_intent, test_slot_loss, test_intent_loss = self._estimate(False)
 
                 if slot_flag:
+                    best_dev_slot_slot = dev_slot
                     test_slot_slot = test_slot
                     test_slot_intent = test_intent
 
                 if intent_flag:
+                    best_dev_intent_intent = dev_intent
                     test_intent_slot = test_slot
                     test_intent_intent = test_intent
 
                 if both_flag:
+                    best_dev_both_slot = dev_slot
+                    best_dev_both_intent = dev_intent
                     test_both_slot = test_slot
                     test_both_intent = test_intent
 
-                print "[优先 -slot-]: 模型在 test 集中, slot f1: {:4.6f}, 且 intent " \
-                      "acc: {:4.6f};".format(test_slot_slot, test_slot_intent)
-                print "[优先 intent]: 模型在 test 集中, slot f1: {:4.6f}, 且 intent " \
-                      "acc: {:4.6f};".format(test_intent_slot, test_intent_intent)
-                print "[优先 -both-]: 模型在 test 集中, slot f1: {:4.6f}, 且 intent " \
-                      "acc: {:4.6f};\n".format(test_both_slot, test_both_intent)
+                print("[优先 -slot-]: 模型在 test 集中, slot f1: {:4.6f}, 且 intent " \
+                      "acc: {:4.6f};".format(test_slot_slot, test_slot_intent))
+                print("[优先 intent]: 模型在 test 集中, slot f1: {:4.6f}, 且 intent " \
+                      "acc: {:4.6f};".format(test_intent_slot, test_intent_intent))
+                print("[优先 -both-]: 模型在 test 集中, slot f1: {:4.6f}, 且 intent " \
+                      "acc: {:4.6f};\n".format(test_both_slot, test_both_intent))
 
             time_estimate_con = time.time() - time_estimate_start
-            print "[轮数 {:03d}]: 模型在 dev 集上, slot f1 为 {:4.6f} , 且 intent acc 为 {:4.6f}, 测" \
-                  "试时间开销 {:3.6f} 秒.".format(epoch, dev_slot, dev_intent, time_estimate_con)
+            print("[轮数 {:03d}]: 模型在 dev 集上, slot f1 为 {:4.6f} , 且 intent acc 为 {:4.6f}, 测" \
+                  "试时间开销 {:3.6f} 秒.\n".format(epoch, dev_slot, dev_intent, time_estimate_con))
+
+        print(
+            "模型在 dev 集上, 最好的slot f1 为 {:4.6f} , 最好的intent acc 为 {:4.6f}.\n" \
+            "同时考虑意图和槽, 最好的slot f1 为 {:4.6f} , 最好的intent acc 为 {:4.6f}.\n".format(
+                best_dev_slot_slot, best_dev_intent_intent, best_dev_both_slot, best_dev_both_intent))
 
     def _estimate(self, dev_mode):
         self._model.eval()
@@ -264,23 +313,41 @@ class Process(object):
         pred_slot_list, real_slot_list = [], []
         pred_intent_list, real_intent_list = [], []
 
+        total_slot_loss, total_intent_loss = 0.0, 0.0
+        data_size = 0.0
+
         loader = self._dev_loader if dev_mode else self._test_loader
         for sent, letter, slot, intent in loader:
+            batch_size = len(intent)
+            data_size += batch_size
+
             p_sent, p_letter, [p_slot, p_intent], seq_lens = Padding.word_padding(
                 sent, letter, [slot, intent]
             )
             e_letter = Padding.letter_padding(p_letter, self._max_letter_len)
 
-            real_slot_list.extend(p_slot)
-            real_intent_list.extend(p_intent)
+            e_slot = list(expand_list(p_slot))  # 整合成一个列表
+            e_intent = list(expand_list(p_intent))
+
+            real_slot_list.extend(iterative_support(self._slot_alphabet.get, p_slot))
+            real_intent_list.extend(iterative_support(self._intent_alphabet.get, p_intent))
 
             var_sent = Variable(torch.LongTensor(p_sent))
             var_letter = Variable(torch.LongTensor(e_letter))
+            var_slot = Variable(torch.LongTensor(e_slot))
+            var_intent = Variable(torch.LongTensor(e_intent))
             if torch.cuda.is_available():
                 var_sent = var_sent.cuda()
                 var_letter = var_letter.cuda()
+                var_slot = var_slot.cuda()
+                var_intent = var_intent.cuda()
 
             pred_slot, pred_intent = self._model(var_sent, var_letter, seq_lens)
+
+            slot_loss = self._criterion(pred_slot, var_slot)
+            intent_loss = self._criterion(pred_intent, var_intent)
+            total_slot_loss += slot_loss.cpu().data.numpy()[0] * batch_size
+            total_intent_loss += intent_loss.cpu().data.numpy()[0] * batch_size
 
             _, slot_index = pred_slot.topk(1, dim=1)
             slot_index = list(expand_list(slot_index.cpu().data.numpy().tolist()))
@@ -294,5 +361,7 @@ class Process(object):
 
         slot_f1 = Metric.get_f1(pred_slot_list, real_slot_list)
         intent_acc = Metric.get_acc(pred_intent_list, real_intent_list)
+        avg_slot_loss = total_slot_loss / data_size
+        avg_intent_loss = total_intent_loss / data_size
 
-        return slot_f1, intent_acc
+        return slot_f1, intent_acc, avg_slot_loss, avg_intent_loss
